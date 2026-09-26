@@ -1,0 +1,244 @@
+# ChatGPT Windows 启动后只有后台进程、没有窗口：修复办法
+
+## 典型症状
+
+* 双击 ChatGPT 没有任何窗口
+* 任务管理器里能看到多个 `ChatGPT.exe`
+* 右下角托盘没有 ChatGPT 图标
+* 重启电脑无效
+* 修复 / 重置 / 重装 ChatGPT 也无效
+
+如果符合这些症状，很可能是 ChatGPT 更新后，本地 `cua_node` runtime 部署失败。
+
+---
+
+## 一、先确认是不是同一个问题
+
+打开 PowerShell，执行：
+
+```powershell
+Get-CimInstance Win32_Process |
+Where-Object {$_.Name -eq "ChatGPT.exe"} |
+Select-Object ProcessId, ParentProcessId, CommandLine |
+Format-List
+```
+
+如果能看到：
+
+```text
+--type=gpu-process
+--type=utility
+--type=crashpad-handler
+```
+
+但完全没有：
+
+```text
+--type=renderer
+```
+
+说明 UI renderer 没有启动。
+
+然后检查 runtime：
+
+```powershell
+Get-ChildItem "$env:LOCALAPPDATA\OpenAI\Codex\runtimes\cua_node" -Directory -Force
+```
+
+如果看到一个或多个：
+
+```text
+.staging-xxxxxxxxxxxxxxxx-xxxxxx
+```
+
+继续检查最新 staging：
+
+```powershell
+$staging = Get-ChildItem "$env:LOCALAPPDATA\OpenAI\Codex\runtimes\cua_node" -Directory -Force |
+Where-Object {$_.Name -like ".staging-*"} |
+Sort-Object LastWriteTime -Descending |
+Select-Object -First 1
+
+Test-Path "$($staging.FullName)\bin\node.exe"
+Test-Path "$($staging.FullName)\bin\node_repl.exe"
+```
+
+如果结果是：
+
+```text
+True
+False
+```
+
+也就是 `node.exe` 存在，但 `node_repl.exe` 不存在，基本可以确定是 runtime staging 复制失败。
+
+---
+
+## 二、修复
+
+### 1. 完全关闭 ChatGPT
+
+```powershell
+Get-Process ChatGPT -ErrorAction SilentlyContinue | Stop-Process -Force
+```
+
+### 2. 自动获取当前安装目录
+
+```powershell
+$pkg = Get-AppxPackage -Name OpenAI.Codex
+
+$src = Join-Path $pkg.InstallLocation "app\resources\cua_node"
+
+$runtimeRoot = "$env:LOCALAPPDATA\OpenAI\Codex\runtimes\cua_node"
+```
+
+### 3. 获取当前 staging 对应的 runtime ID
+
+```powershell
+$staging = Get-ChildItem $runtimeRoot -Directory -Force |
+Where-Object {$_.Name -like ".staging-*"} |
+Sort-Object LastWriteTime -Descending |
+Select-Object -First 1
+
+$runtimeId = ($staging.Name -replace '^\.staging-','') -replace '-[^-]+$',''
+
+$dst = Join-Path $runtimeRoot $runtimeId
+```
+
+检查一下：
+
+```powershell
+Write-Host "Source: $src"
+Write-Host "Runtime ID: $runtimeId"
+Write-Host "Destination: $dst"
+```
+
+### 4. 创建正式 runtime 目录
+
+```powershell
+New-Item -ItemType Directory -Path $dst -Force | Out-Null
+```
+
+### 5. 用 xcopy /G 完整复制 runtime
+
+```powershell
+cmd /c "xcopy `"$src\*`" `"$dst\`" /E /H /I /Y /G"
+```
+
+关键是：
+
+```text
+/G
+```
+
+不要删掉。
+
+它允许 Windows 把安装目录里受保护/加密属性的文件复制到普通本地目录。
+
+---
+
+## 三、检查复制是否成功
+
+```powershell
+Test-Path "$dst\bin\node.exe"
+Test-Path "$dst\bin\node_repl.exe"
+```
+
+正常应该是：
+
+```text
+True
+True
+```
+
+再检查文件数量：
+
+```powershell
+(Get-ChildItem $dst -Recurse -File -Force -ErrorAction SilentlyContinue).Count
+```
+
+如果之前失败的 staging 只有几百或一千个文件，而现在变成几千个，说明完整 runtime 已经复制成功。
+
+---
+
+## 四、清理失败的 staging
+
+```powershell
+Get-ChildItem $runtimeRoot -Directory -Force |
+Where-Object {$_.Name -like ".staging-*"} |
+Remove-Item -Recurse -Force
+```
+
+---
+
+## 五、重新启动 ChatGPT
+
+```powershell
+Start-Process "shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App"
+```
+
+正常情况下，ChatGPT 窗口应该恢复。
+
+---
+
+## 原因简述
+
+问题不是 ChatGPT 安装包损坏，也不是普通权限不足。
+
+更像是：
+
+```text
+ChatGPT 自动更新
+↓
+新版需要重新部署 cua_node runtime
+↓
+从 WindowsApps 复制部分受保护文件时失败
+↓
+.staging-* 目录只复制了一部分文件
+↓
+node_repl.exe 等文件缺失
+↓
+renderer 无法启动
+↓
+任务管理器有 ChatGPT.exe，但没有窗口
+```
+
+手动使用：
+
+```text
+xcopy /G
+```
+
+完整复制 runtime 后即可绕过这个部署失败。
+
+---
+
+## 以后最快判断方法
+
+如果某次 ChatGPT 更新后又突然：
+
+* 有后台进程
+* 没窗口
+* 重装也没用
+
+直接先执行：
+
+```powershell
+Get-ChildItem "$env:LOCALAPPDATA\OpenAI\Codex\runtimes\cua_node" -Directory -Force
+```
+
+如果出现新的 `.staging-*`，再检查：
+
+```powershell
+Test-Path "$($staging.FullName)\bin\node.exe"
+Test-Path "$($staging.FullName)\bin\node_repl.exe"
+```
+
+如果还是：
+
+```text
+True
+False
+```
+
+就直接按上面的修复流程处理。

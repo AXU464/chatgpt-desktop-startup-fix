@@ -1,0 +1,26 @@
+# Local diagnostic logs and exports can contain personal paths and identifiers.
+*.log
+logs/
+*.dmp
+*.etl
+*.evtx
+*.zip
+*.bak
+*.tmp
+
+# Credentials and local configuration.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+credentials*
+secrets*
+
+# Editor and OS files.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
